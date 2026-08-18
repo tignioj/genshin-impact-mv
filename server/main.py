@@ -100,12 +100,27 @@ def character_record(name: str) -> dict[str, Any]:
 
 def video_rank(video: dict[str, Any]) -> tuple[int, str] | None:
     title = str(video.get("title", ""))
+    category = re.sub(r"[\s_-]", "", str(video.get("category", ""))).upper()
     normalized = title.upper().replace("－", "-")
-    if re.search(r"(?:^|[\s《》_-])EP(?:$|[\s《》_-])", normalized):
+
+    # Wiki metadata already provides an authoritative category. Prefer it to
+    # title heuristics because many official titles join the character name
+    # directly to "EP", for example "珊瑚宫心海EP".
+    if category in {"角色EP", "EP"}:
+        return 0, "EP 视频"
+    if category == "角色预告":
+        return 1, "角色预告"
+    if category == "角色PV":
+        return 2, "角色 PV"
+    if category == "角色演示":
+        return 3, "角色演示"
+
+    compact_title = re.sub(r"\s", "", normalized)
+    if re.search(r"EP(?=$|[-—_《》「])", compact_title):
         return 0, "EP 视频"
     if "角色预告" in title:
         return 1, "角色预告"
-    if "角色PV" in normalized.replace(" ", ""):
+    if "角色PV" in compact_title:
         return 2, "角色 PV"
     if "角色演示" in title:
         return 3, "角色演示"

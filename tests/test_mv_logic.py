@@ -40,6 +40,17 @@ class SourceSelectionTests(unittest.TestCase):
         self.assertEqual(video_rank({"title": "《原神》角色PV——测试"})[0], 2)
         self.assertEqual(video_rank({"title": "《原神》角色演示-测试"})[0], 3)
 
+    def test_ep_category_is_authoritative(self) -> None:
+        video = {
+            "title": "《原神》珊瑚宫心海EP - 浮岳映虹之波",
+            "category": "角色EP",
+        }
+        self.assertEqual(video_rank(video), (0, "EP 视频"))
+
+    def test_attached_ep_title_fallback(self) -> None:
+        video = {"title": "《原神》珊瑚宫心海EP - 浮岳映虹之波"}
+        self.assertEqual(video_rank(video), (0, "EP 视频"))
+
 
 class SubtitleTests(unittest.TestCase):
     def test_lrc_conversion(self) -> None:
