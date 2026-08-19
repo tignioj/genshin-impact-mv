@@ -2,6 +2,8 @@
 
 /* Wiki assets come from a configurable local origin, so native images are intentional. */
 /* eslint-disable @next/next/no-img-element */
+/* Generated MV subtitles are burned into the video frames. */
+/* eslint-disable jsx-a11y/media-has-caption */
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
@@ -23,6 +25,12 @@ type Job = {
   source_type?: string;
   source_title?: string;
   duration?: number;
+  original_artist?: string;
+  song_name?: string;
+  has_subtitles?: boolean;
+  lyrics_status?: "pending" | "searching" | "found" | "not_found" | "invalid" | "error" | "manual";
+  lyrics_message?: string;
+  preview_url?: string;
   download_url?: string;
   error?: string;
 };
@@ -96,6 +104,8 @@ export default function Home() {
   const [selected, setSelected] = useState<Character | null>(null);
   const [music, setMusic] = useState<File | null>(null);
   const [subtitle, setSubtitle] = useState<File | null>(null);
+  const [originalArtist, setOriginalArtist] = useState("");
+  const [songName, setSongName] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [loadingCharacters, setLoadingCharacters] = useState(false);
   const [error, setError] = useState("");
@@ -137,7 +147,10 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [job]);
 
-  const ready = Boolean(selected && music && subtitle && (!job || !["queued", "processing"].includes(job.status)));
+  const ready = Boolean(
+    selected && music && originalArtist.trim() && songName.trim()
+    && (!job || !["queued", "processing"].includes(job.status)),
+  );
   const showSuggestions = query.length > 0 && query !== selected?.name;
   const progress = job?.progress || 0;
   const statusLabel = useMemo(() => {
@@ -149,15 +162,17 @@ export default function Home() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!selected || !music || !subtitle) return;
+    if (!selected || !music) return;
     setError("");
     setJob(null);
     const form = new FormData();
     form.append("character", selected.name);
     form.append("music", music);
-    form.append("subtitles", subtitle);
+    form.append("original_artist", originalArtist.trim());
+    form.append("song_name", songName.trim());
+    if (subtitle) form.append("subtitles", subtitle);
     try {
-      const response = await fetch(`${API_ROOT}/api/mv`, { method: "POST", body: form });
+      const response = await fetch(`${API_ROOT}/api/cover-mv`, { method: "POST", body: form });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || data.error || "创建任务失败");
       setJob(data);
@@ -182,7 +197,7 @@ export default function Home() {
       <section className="hero" id="top">
         <div className="eyebrow"><span>✦</span> 一首歌，一段属于角色的旅程</div>
         <h1>让旋律驶入<br /><em>提瓦特的画面</em></h1>
-        <p>选择角色，上传音乐与字幕。系统会从角色 EP、预告、PV、演示或生日贺图中自动选取最佳素材，制作一支完整 MV。</p>
+        <p>选择角色并上传翻唱音乐。系统会自动寻找原曲同步歌词，并从角色 EP、预告、PV、演示或生日贺图中选取最佳素材。</p>
         <div className="priority-line" aria-label="素材选择优先级">
           <span>EP 视频</span><b>›</b><span>角色预告</span><b>›</b><span>角色 PV</span><b>›</b><span>角色演示</span><b>›</b><span>生日贺图</span>
         </div>
@@ -241,12 +256,35 @@ export default function Home() {
 
           <div className="section-heading compact">
             <span className="step-number">02</span>
-            <div><h2>加入声音与文字</h2><p>音乐决定成片长度，最长支持 10 分钟</p></div>
+            <div><h2>加入翻唱与原曲信息</h2><p>原唱歌手和歌曲名称用于自动查找同步歌词</p></div>
+          </div>
+
+          <div className="song-meta-grid">
+            <label>
+              <span>原唱歌手</span>
+              <input
+                value={originalArtist}
+                onChange={(event) => setOriginalArtist(event.target.value)}
+                placeholder="例如：周杰伦"
+                maxLength={160}
+                required
+              />
+            </label>
+            <label>
+              <span>歌曲名称</span>
+              <input
+                value={songName}
+                onChange={(event) => setSongName(event.target.value)}
+                placeholder="例如：晴天"
+                maxLength={160}
+                required
+              />
+            </label>
           </div>
 
           <div className="file-grid">
-            <FileDrop kind="music" title="上传音乐" description="MP3 · WAV · M4A · FLAC" accept="audio/*,.mp3,.wav,.m4a,.flac,.aac,.ogg" file={music} onChange={setMusic} />
-            <FileDrop kind="subtitle" title="上传字幕" description="SRT · LRC，自动烧录进画面" accept=".srt,.lrc,text/plain" file={subtitle} onChange={setSubtitle} />
+            <FileDrop kind="music" title="上传翻唱音乐" description="MP3 · WAV · M4A · FLAC" accept="audio/*,.mp3,.wav,.m4a,.flac,.aac,.ogg" file={music} onChange={setMusic} />
+            <FileDrop kind="subtitle" title="手动字幕（可选）" description="SRT · LRC；上传后优先使用" accept=".srt,.lrc,text/plain" file={subtitle} onChange={setSubtitle} />
           </div>
 
           {error && <div className="error-message">{error}</div>}
@@ -254,20 +292,36 @@ export default function Home() {
           <button className="create-button" type="submit" disabled={!ready}>
             <span>{job?.status === "completed" ? "重新制作" : "开始制作 MV"}</span><b>→</b>
           </button>
-          <p className="consent">提交即表示你确认拥有所上传音乐与字幕的使用权限</p>
+          <p className="consent">未上传字幕时会自动查找同步歌词；查找失败仍会生成无字幕 MV</p>
         </section>
 
         <aside className="preview-panel">
           <div className="preview-topline"><span>成片预览</span><small>16:9 · 1080P</small></div>
           <div className={`preview-screen ${selected ? "has-character" : ""}`}>
-            {selected?.portrait && <img src={assetUrl(selected.portrait)} alt="" />}
-            <div className="preview-shade" />
-            <div className="constellation">✦</div>
-            <div className="preview-copy">
-              <small>{selected ? selected.title || "角色印象 MV" : "CHARACTER FILM"}</small>
-              <strong>{selected?.name || "等待选择角色"}</strong>
-              <span>{music?.name || "上传音乐后开始创作"}</span>
-            </div>
+            {job?.status === "completed" && job.preview_url ? (
+              <video
+                key={job.id}
+                className="preview-video"
+                controls
+                playsInline
+                preload="metadata"
+                poster={selected?.portrait ? assetUrl(selected.portrait) : undefined}
+                src={`${API_ROOT}${job.preview_url}`}
+              >
+                当前浏览器不支持视频预览，请下载成片后播放。
+              </video>
+            ) : (
+              <>
+                {selected?.portrait && <img src={assetUrl(selected.portrait)} alt="" />}
+                <div className="preview-shade" />
+                <div className="constellation">✦</div>
+                <div className="preview-copy">
+                  <small>{selected ? selected.title || "角色印象 MV" : "CHARACTER FILM"}</small>
+                  <strong>{selected?.name || "等待选择角色"}</strong>
+                  <span>{music?.name || "上传音乐后开始创作"}</span>
+                </div>
+              </>
+            )}
           </div>
 
           <div className="status-block">
@@ -277,6 +331,7 @@ export default function Home() {
               <span><small>画面来源</small><strong>{job?.source_type || "自动择优"}</strong></span>
               <span><small>成片时长</small><strong>{job?.duration ? `${Math.floor(job.duration / 60)}:${String(Math.round(job.duration % 60)).padStart(2, "0")}` : "随音乐"}</strong></span>
             </div>
+            {job?.lyrics_message && <p className={`lyrics-state is-${job.lyrics_status || "pending"}`}>{job.lyrics_message}</p>}
           </div>
 
           {job?.status === "completed" && job.download_url && (

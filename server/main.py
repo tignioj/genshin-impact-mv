@@ -25,6 +25,15 @@ load_dotenv(ROOT / ".env")
 WORK_DIR = ROOT / "work"
 OUTPUT_DIR = ROOT / "outputs"
 WIKI_URL = os.environ.get("GI_WIKI_URL", "http://127.0.0.1:8765").rstrip("/")
+LYRICS_AGENT_DIR = Path(
+    os.environ.get("LYRICS_AGENT_PATH", ROOT.parent / "sing-song" / "lyrics-fetch-agent")
+).resolve()
+try:
+    LYRICS_AGENT_TIMEOUT_SECONDS = float(os.environ.get("LYRICS_AGENT_TIMEOUT", "240"))
+except ValueError:
+    LYRICS_AGENT_TIMEOUT_SECONDS = 240.0
+if LYRICS_AGENT_TIMEOUT_SECONDS <= 0:
+    LYRICS_AGENT_TIMEOUT_SECONDS = 240.0
 MAX_DURATION_SECONDS = 600.0
 MAX_MUSIC_BYTES = 300 * 1024 * 1024
 MAX_SUBTITLE_BYTES = 5 * 1024 * 1024
@@ -38,8 +47,8 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(
     title="映界 · 原神 MV 合成 API",
-    version="1.0.0",
-    description="使用 GI Wiki 角色素材、用户音乐和 SRT/LRC 字幕生成 1080P MV。",
+    version="1.1.0",
+    description="使用 GI Wiki 角色素材、用户音乐和自动获取的同步歌词生成 1080P 翻唱 MV。",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -60,7 +69,9 @@ def utc_now() -> str:
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "id", "status", "progress", "message", "character", "source_type",
-        "source_title", "duration", "download_url", "error", "created_at", "updated_at",
+        "source_title", "duration", "original_artist", "song_name", "has_subtitles",
+        "subtitle_source", "lyrics_status", "lyrics_message", "lyrics_sources",
+        "preview_url", "download_url", "error", "created_at", "updated_at",
     )
     return {key: job[key] for key in keys if key in job}
 
@@ -241,6 +252,118 @@ def prepare_subtitle(payload: bytes, extension: str, duration: float, destinatio
     destination.write_text(text, encoding="utf-8")
 
 
+def lyrics_agent_command() -> list[str] | None:
+    """Return a command that runs the adjacent lyrics-fetch-agent project."""
+    candidates = (
+        LYRICS_AGENT_DIR / ".venv" / "Scripts" / "lyrics-agent.exe",
+        LYRICS_AGENT_DIR / ".venv" / "bin" / "lyrics-agent",
+    )
+    executable = next((path for path in candidates if path.is_file()), None)
+    if executable:
+        return [str(executable)]
+    uv = shutil.which("uv")
+    if uv and (LYRICS_AGENT_DIR / "pyproject.toml").is_file():
+        return [uv, "run", "--project", str(LYRICS_AGENT_DIR), "lyrics-agent"]
+    return None
+
+
+def fetch_timed_lyrics(original_artist: str, song_name: str) -> dict[str, Any]:
+    command = lyrics_agent_command()
+    if not command:
+        raise RuntimeError(f"未找到 lyrics-fetch-agent：{LYRICS_AGENT_DIR}")
+    result = subprocess.run(
+        [
+            *command,
+            "--artist", original_artist,
+            "--song", song_name,
+            "--timed",
+            "--quiet",
+        ],
+        cwd=LYRICS_AGENT_DIR,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=LYRICS_AGENT_TIMEOUT_SECONDS,
+        check=False,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip().splitlines()
+        raise RuntimeError(detail[-1][:300] if detail else "lyrics-fetch-agent 执行失败")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("lyrics-fetch-agent 未返回有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("lyrics-fetch-agent 返回结果格式无效")
+    return payload
+
+
+def prepare_auto_subtitle(job_id: str, job: dict[str, Any], destination: Path) -> bool:
+    """Fetch verified LRC lyrics; any failure is a subtitle miss, not a job failure."""
+    update_job(job_id, progress=2, message="正在搜索原曲同步歌词", lyrics_status="searching")
+    try:
+        result = fetch_timed_lyrics(job["original_artist"], job["song_name"])
+        (destination.parent / "lyrics-result.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except subprocess.TimeoutExpired:
+        update_job(
+            job_id,
+            has_subtitles=False,
+            subtitle_source="none",
+            lyrics_status="error",
+            lyrics_message="同步歌词搜索超时，将生成无字幕 MV",
+        )
+        return False
+    except (OSError, RuntimeError) as exc:
+        update_job(
+            job_id,
+            has_subtitles=False,
+            subtitle_source="none",
+            lyrics_status="error",
+            lyrics_message=f"{str(exc)[:240]}；将生成无字幕 MV",
+        )
+        return False
+
+    lyrics = result.get("lyrics")
+    if not result.get("found") or not result.get("timed") or not isinstance(lyrics, str):
+        reason = str(result.get("message") or "未找到可靠的同步歌词")
+        update_job(
+            job_id,
+            has_subtitles=False,
+            subtitle_source="none",
+            lyrics_status="not_found",
+            lyrics_message=f"{reason[:240]}；将生成无字幕 MV",
+            lyrics_sources=result.get("sources", []),
+        )
+        return False
+
+    try:
+        prepare_subtitle(lyrics.encode("utf-8"), ".lrc", float(job["duration"]), destination)
+    except HTTPException as exc:
+        update_job(
+            job_id,
+            has_subtitles=False,
+            subtitle_source="none",
+            lyrics_status="invalid",
+            lyrics_message=f"同步歌词时间轴无效：{exc.detail}；将生成无字幕 MV",
+            lyrics_sources=result.get("sources", []),
+        )
+        return False
+
+    update_job(
+        job_id,
+        has_subtitles=True,
+        subtitle_source="lyrics_agent",
+        lyrics_status="found",
+        lyrics_message="已获取同步歌词，成片将烧录字幕",
+        lyrics_sources=result.get("sources", []),
+    )
+    return True
+
+
 async def save_upload(upload: UploadFile, destination: Path, byte_limit: int) -> int:
     total = 0
     try:
@@ -315,6 +438,10 @@ def process_job(job_id: str) -> None:
     job_dir = Path(job["job_dir"])
     duration = float(job["duration"])
     try:
+        if not job.get("has_subtitles") and job.get("original_artist") and job.get("song_name"):
+            job["has_subtitles"] = prepare_auto_subtitle(
+                job_id, job, job_dir / "subtitle.srt"
+            )
         update_job(job_id, status="processing", progress=5, message="正在请求角色 Wiki 素材")
         record = character_record(job["character"])
         source = choose_source(record)
@@ -335,7 +462,14 @@ def process_job(job_id: str) -> None:
             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
             "-progress", "pipe:1", "-nostats", "-y", str(output_path),
         ]
-        subtitle_filter = ffmpeg_subtitle_filter()
+        render_filters = [
+            "scale=1920:1080:force_original_aspect_ratio=increase",
+            "crop=1920:1080",
+            "fps=30",
+        ]
+        if job.get("has_subtitles"):
+            render_filters.append(ffmpeg_subtitle_filter())
+        render_filter = ",".join(render_filters)
 
         if source["kind"] == "video":
             parsed_path = urllib.parse.urlparse(source["urls"][0]).path
@@ -344,14 +478,10 @@ def process_job(job_id: str) -> None:
             source_name = f"source{suffix}"
             download_asset(source["urls"][0], job_dir / source_name)
             update_job(job_id, progress=30, message="正在合成视频与音乐")
-            video_filter = (
-                "scale=1920:1080:force_original_aspect_ratio=increase,"
-                "crop=1920:1080,fps=30," + subtitle_filter
-            )
             command = [
                 "ffmpeg", "-hide_banner", "-loglevel", "warning",
                 "-stream_loop", "-1", "-i", source_name, "-i", music_name,
-                "-vf", video_filter,
+                "-vf", render_filter,
             ] + common_output
         else:
             image_names: list[str] = []
@@ -369,14 +499,10 @@ def process_job(job_id: str) -> None:
                 )
             create_slides_file(image_names, duration, job_dir / "slides.txt")
             update_job(job_id, progress=30, message="正在制作生日贺图轮播")
-            image_filter = (
-                "scale=1920:1080:force_original_aspect_ratio=increase,"
-                "crop=1920:1080,fps=30," + subtitle_filter
-            )
             command = [
                 "ffmpeg", "-hide_banner", "-loglevel", "warning",
                 "-f", "concat", "-safe", "0", "-i", "slides.txt", "-i", music_name,
-                "-vf", image_filter,
+                "-vf", render_filter,
             ] + common_output
 
         run_ffmpeg(job_id, command, duration, job_dir)
@@ -385,6 +511,7 @@ def process_job(job_id: str) -> None:
             status="completed",
             progress=100,
             message="成片已就绪",
+            preview_url=f"/api/jobs/{job_id}/preview",
             download_url=f"/api/jobs/{job_id}/download",
             output_path=str(output_path),
         )
@@ -400,6 +527,7 @@ def api_index() -> dict[str, Any]:
         "name": "映界 · 原神 MV 合成 API",
         "docs": "/docs",
         "health": "/api/health",
+        "cover_mv": "/api/cover-mv",
         "max_duration_seconds": int(MAX_DURATION_SECONDS),
         "source_priority": ["EP 视频", "角色预告", "角色 PV", "角色演示", "生日贺图"],
     }
@@ -420,6 +548,7 @@ def health() -> dict[str, Any]:
         "wiki": "connected" if wiki_ok else "unavailable",
         "wiki_characters": wiki_characters,
         "ffmpeg": shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None,
+        "lyrics_agent": lyrics_agent_command() is not None,
     }
 
 
@@ -435,21 +564,30 @@ def character_source(name: str) -> dict[str, Any]:
     return {"character": record.get("name", name), **choose_source(record)}
 
 
-@app.post("/api/mv", status_code=202)
-async def create_mv(
+async def create_mv_job(
     character: str = Form(...),
     music: UploadFile = File(...),
-    subtitles: UploadFile = File(...),
+    original_artist: str | None = Form(None),
+    song_name: str | None = Form(None),
+    subtitles: UploadFile | None = File(None),
 ) -> dict[str, Any]:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         raise HTTPException(503, "未找到 FFmpeg，请先安装并加入 PATH")
 
     music_extension = Path(music.filename or "").suffix.lower()
-    subtitle_extension = Path(subtitles.filename or "").suffix.lower()
+    has_subtitles = bool(subtitles and subtitles.filename)
+    subtitle_extension = Path(subtitles.filename or "").suffix.lower() if has_subtitles and subtitles else ""
     if music_extension not in MUSIC_EXTENSIONS:
         raise HTTPException(400, "音乐格式不支持，请上传 MP3、WAV、M4A、FLAC、AAC、OGG 或 OPUS")
-    if subtitle_extension not in SUBTITLE_EXTENSIONS:
+    if has_subtitles and subtitle_extension not in SUBTITLE_EXTENSIONS:
         raise HTTPException(400, "字幕格式不支持，请上传 SRT 或 LRC")
+
+    clean_artist = (original_artist or "").strip()
+    clean_song_name = (song_name or "").strip()
+    if bool(clean_artist) != bool(clean_song_name):
+        raise HTTPException(400, "原唱歌手和歌曲名称必须同时填写")
+    if len(clean_artist) > 160 or len(clean_song_name) > 160:
+        raise HTTPException(400, "原唱歌手或歌曲名称过长")
 
     record = character_record(character)
     choose_source(record)
@@ -461,16 +599,17 @@ async def create_mv(
     music_path = job_dir / music_name
     await save_upload(music, music_path, MAX_MUSIC_BYTES)
     duration = ffprobe_duration(music_path)
-    subtitle_payload = await subtitles.read(MAX_SUBTITLE_BYTES + 1)
-    await subtitles.close()
-    if len(subtitle_payload) > MAX_SUBTITLE_BYTES:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(413, "字幕文件不能超过 5 MB")
-    try:
-        prepare_subtitle(subtitle_payload, subtitle_extension, duration, job_dir / "subtitle.srt")
-    except HTTPException:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        raise
+    if has_subtitles and subtitles:
+        subtitle_payload = await subtitles.read(MAX_SUBTITLE_BYTES + 1)
+        await subtitles.close()
+        if len(subtitle_payload) > MAX_SUBTITLE_BYTES:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise HTTPException(413, "字幕文件不能超过 5 MB")
+        try:
+            prepare_subtitle(subtitle_payload, subtitle_extension, duration, job_dir / "subtitle.srt")
+        except HTTPException:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise
 
     job = {
         "id": job_id,
@@ -479,6 +618,12 @@ async def create_mv(
         "message": "任务已进入队列",
         "character": record.get("name", character.strip()),
         "duration": round(duration, 3),
+        "original_artist": clean_artist or None,
+        "song_name": clean_song_name or None,
+        "has_subtitles": has_subtitles,
+        "subtitle_source": "upload" if has_subtitles else "pending" if clean_artist else "none",
+        "lyrics_status": "manual" if has_subtitles else "pending" if clean_artist else "not_requested",
+        "lyrics_message": "使用上传的字幕文件" if has_subtitles else None,
         "created_at": utc_now(),
         "updated_at": utc_now(),
         "job_dir": str(job_dir),
@@ -491,6 +636,32 @@ async def create_mv(
     return public_job(job)
 
 
+@app.post("/api/mv", status_code=202)
+async def create_mv(
+    character: str = Form(...),
+    music: UploadFile = File(...),
+    original_artist: str | None = Form(None),
+    song_name: str | None = Form(None),
+    subtitles: UploadFile | None = File(None),
+) -> dict[str, Any]:
+    """Backward-compatible MV endpoint; artist/song enable automatic subtitles."""
+    return await create_mv_job(character, music, original_artist, song_name, subtitles)
+
+
+@app.post("/api/cover-mv", status_code=202)
+async def create_cover_mv(
+    character: str = Form(...),
+    music: UploadFile = File(...),
+    original_artist: str = Form(...),
+    song_name: str = Form(...),
+    subtitles: UploadFile | None = File(None),
+) -> dict[str, Any]:
+    """Create a cover MV and automatically fetch verified synchronized lyrics."""
+    if not original_artist.strip() or not song_name.strip():
+        raise HTTPException(400, "原唱歌手和歌曲名称不能为空")
+    return await create_mv_job(character, music, original_artist, song_name, subtitles)
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict[str, Any]:
     with JOBS_LOCK:
@@ -500,8 +671,7 @@ def get_job(job_id: str) -> dict[str, Any]:
         return public_job(job)
 
 
-@app.get("/api/jobs/{job_id}/download")
-def download_job(job_id: str) -> FileResponse:
+def completed_output(job_id: str) -> tuple[Path, str]:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if not job:
@@ -512,4 +682,20 @@ def download_job(job_id: str) -> FileResponse:
         character = job["character"]
     if not output_path.is_file():
         raise HTTPException(404, "成片文件不存在")
+    return output_path, character
+
+
+@app.get("/api/jobs/{job_id}/preview")
+def preview_job(job_id: str) -> FileResponse:
+    output_path, _ = completed_output(job_id)
+    return FileResponse(
+        output_path,
+        media_type="video/mp4",
+        headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=3600"},
+    )
+
+
+@app.get("/api/jobs/{job_id}/download")
+def download_job(job_id: str) -> FileResponse:
+    output_path, character = completed_output(job_id)
     return FileResponse(output_path, media_type="video/mp4", filename=f"{character}-MV.mp4")

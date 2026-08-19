@@ -1,0 +1,35 @@
+{
+  "service_url": {
+    "description": "映界 MV 服务地址",
+    "type": "string",
+    "default": "http://192.168.100.1:18787",
+    "hint": "默认通过路由器上的反向 SSH 隧道访问 Windows MV 服务。"
+  },
+  "timeout_seconds": {
+    "description": "单次 MV 任务超时秒数",
+    "type": "int",
+    "default": 7200
+  },
+  "poll_interval_seconds": {
+    "description": "任务状态轮询间隔秒数",
+    "type": "float",
+    "default": 5.0
+  },
+  "max_music_size_mb": {
+    "description": "允许引用的最大音乐文件大小（MB）",
+    "type": "int",
+    "default": 300,
+    "hint": "映界服务自身的上限也是 300 MB。"
+  },
+  "send_as_file": {
+    "description": "将成片作为文件发送",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时作为视频消息发送；若平台的视频消息大小受限，可开启此项。"
+  },
+  "output_retention_hours": {
+    "description": "AstrBot 本地成片保留小时数",
+    "type": "int",
+    "default": 24
+  }
+}
