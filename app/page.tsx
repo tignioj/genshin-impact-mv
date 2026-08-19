@@ -27,6 +27,7 @@ type Job = {
   duration?: number;
   original_artist?: string;
   song_name?: string;
+  lyric_offset_seconds?: number;
   has_subtitles?: boolean;
   lyrics_status?: "pending" | "searching" | "found" | "not_found" | "invalid" | "error" | "manual";
   lyrics_message?: string;
@@ -50,6 +51,13 @@ function assetUrl(url?: string | null) {
 function formatSize(size: number) {
   if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatLyricOffset(seconds: number) {
+  const value = String(Number(seconds.toFixed(3)));
+  if (seconds > 0) return `+${value} 秒（延后）`;
+  if (seconds < 0) return `${value} 秒（提前）`;
+  return "0 秒（不偏移）";
 }
 
 function FileDrop({
@@ -109,6 +117,7 @@ export default function Home() {
   const [subtitle, setSubtitle] = useState<File | null>(null);
   const [originalArtist, setOriginalArtist] = useState("");
   const [songName, setSongName] = useState("");
+  const [lyricOffsetSeconds, setLyricOffsetSeconds] = useState(0);
   const [sourceType, setSourceType] = useState<SourceType | "">("");
   const [job, setJob] = useState<Job | null>(null);
   const [loadingCharacters, setLoadingCharacters] = useState(false);
@@ -174,6 +183,7 @@ export default function Home() {
     form.append("music", music);
     form.append("original_artist", originalArtist.trim());
     form.append("song_name", songName.trim());
+    form.append("lyric_offset_seconds", String(lyricOffsetSeconds));
     if (sourceType) form.append("source_type", sourceType);
     if (subtitle) form.append("subtitles", subtitle);
     try {
@@ -321,6 +331,40 @@ export default function Home() {
             </label>
           </div>
 
+          <div className="lyric-offset-field">
+            <div className="offset-copy">
+              <span>歌词时间偏移</span>
+              <small>正数让歌词延后，负数让歌词提前；默认不偏移</small>
+            </div>
+            <div className="offset-control">
+              <button
+                type="button"
+                aria-label="歌词提前 1 秒"
+                onClick={() => setLyricOffsetSeconds((value) => Math.max(-600, value - 1))}
+              >−1</button>
+              <label>
+                <input
+                  type="number"
+                  min={-600}
+                  max={600}
+                  step={0.1}
+                  value={lyricOffsetSeconds}
+                  aria-label="歌词时间偏移秒数"
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setLyricOffsetSeconds(Number.isFinite(value) ? Math.min(600, Math.max(-600, value)) : 0);
+                  }}
+                />
+                <span>秒</span>
+              </label>
+              <button
+                type="button"
+                aria-label="歌词延后 1 秒"
+                onClick={() => setLyricOffsetSeconds((value) => Math.min(600, value + 1))}
+              >+1</button>
+            </div>
+          </div>
+
           <div className="file-grid">
             <FileDrop kind="music" title="上传翻唱音乐" description="MP3 · WAV · M4A · FLAC" accept="audio/*,.mp3,.wav,.m4a,.flac,.aac,.ogg" file={music} onChange={setMusic} />
             <FileDrop kind="subtitle" title="手动字幕（可选）" description="SRT · LRC；上传后优先使用" accept=".srt,.lrc,text/plain" file={subtitle} onChange={setSubtitle} />
@@ -370,6 +414,7 @@ export default function Home() {
               <span><small>画面来源</small><strong>{job?.source_type || sourceType || "自动择优"}</strong></span>
               <span><small>成片时长</small><strong>{job?.duration ? `${Math.floor(job.duration / 60)}:${String(Math.round(job.duration % 60)).padStart(2, "0")}` : "随音乐"}</strong></span>
             </div>
+            <p className="offset-state"><small>歌词偏移</small><strong>{formatLyricOffset(job?.lyric_offset_seconds ?? lyricOffsetSeconds)}</strong></p>
             {job?.lyrics_message && <p className={`lyrics-state is-${job.lyrics_status || "pending"}`}>{job.lyrics_message}</p>}
           </div>
 
