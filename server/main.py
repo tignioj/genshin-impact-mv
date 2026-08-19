@@ -26,6 +26,14 @@ load_dotenv(ROOT / ".env")
 WORK_DIR = ROOT / "work"
 OUTPUT_DIR = ROOT / "outputs"
 WIKI_URL = os.environ.get("GI_WIKI_URL", "http://127.0.0.1:8765").rstrip("/")
+WEB_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "MV_WEB_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,https://yingjie-genshin-mv.j86hsfwvm6.chatgpt.site",
+    ).split(",")
+    if origin.strip()
+]
 LYRICS_AGENT_DIR = Path(
     os.environ.get("LYRICS_AGENT_PATH", ROOT.parent / "sing-song" / "lyrics-fetch-agent")
 ).resolve()
@@ -54,7 +62,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=WEB_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
