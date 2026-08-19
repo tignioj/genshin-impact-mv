@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from server import main as server_main
 from server.main import (
+    character_source,
     choose_source,
     fetch_timed_lyrics,
     lrc_to_srt,
@@ -84,6 +85,23 @@ class SourceSelectionTests(unittest.TestCase):
     def test_invalid_manual_type_is_rejected(self) -> None:
         with self.assertRaisesRegex(HTTPException, "画面素材类型无效"):
             choose_source({"name": "测试角色", "videos": [], "images": {}}, "其他")
+
+    @patch("server.main.character_record")
+    def test_source_preview_endpoint_honors_manual_type(self, record) -> None:
+        record.return_value = {
+            "name": "测试角色",
+            "videos": [
+                {"title": "《原神》EP - 测试", "url": "/ep.mp4"},
+                {"title": "《原神》角色演示-测试", "url": "/demo.mp4"},
+            ],
+            "images": {},
+        }
+
+        selected = character_source("测试角色", "角色演示")
+
+        self.assertEqual(selected["kind"], "video")
+        self.assertEqual(selected["type"], "角色演示")
+        self.assertEqual(selected["urls"], ["/demo.mp4"])
 
     def test_missing_source_is_rejected(self) -> None:
         with self.assertRaises(HTTPException):

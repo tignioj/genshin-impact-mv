@@ -623,9 +623,10 @@ def characters(q: str = "", limit: int = 20) -> dict[str, Any]:
 
 
 @app.get("/api/characters/{name}/source")
-def character_source(name: str) -> dict[str, Any]:
+def character_source(name: str, source_type: str | None = None) -> dict[str, Any]:
     record = character_record(name)
-    return {"character": record.get("name", name), **choose_source(record)}
+    clean_source_type = (source_type or "").strip() or None
+    return {"character": record.get("name", name), **choose_source(record, clean_source_type)}
 
 
 async def create_mv_job(

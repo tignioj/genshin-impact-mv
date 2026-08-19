@@ -130,6 +130,21 @@ main::before {
 .source-picker small { color: #687679; font-size: 8px; }
 .source-picker label.is-selected strong { color: var(--gold); }
 .source-picker label:has(input:focus-visible) { outline: 2px solid rgba(222,193,123,.7); outline-offset: 2px; }
+.source-preview { margin-top: 12px; border: 1px solid rgba(222,193,123,.13); background: rgba(3,8,10,.5); min-height: 72px; overflow: hidden; }
+.source-preview-heading { height: 38px; padding: 0 12px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; border-bottom: 1px solid rgba(255,255,255,.05); }
+.source-preview-heading span { color: var(--gold); font-size: 9px; letter-spacing: .08em; white-space: nowrap; }
+.source-preview-heading strong { min-width: 0; color: #aab4b4; font-size: 10px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-preview > video, .source-image-stage { display: block; width: 100%; aspect-ratio: 16/9; background: #020607; }
+.source-preview > video { object-fit: contain; }
+.source-image-stage { position: relative; }
+.source-image-stage > img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.source-image-nav { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); display: flex; align-items: center; gap: 9px; padding: 4px; background: rgba(3,8,10,.78); border: 1px solid rgba(222,193,123,.2); backdrop-filter: blur(8px); }
+.source-image-nav button { width: 30px; height: 27px; border: 0; background: rgba(222,193,123,.08); color: var(--gold); cursor: pointer; font-size: 20px; line-height: 1; }
+.source-image-nav button:hover, .source-image-nav button:focus-visible { background: rgba(222,193,123,.18); outline: 1px solid rgba(222,193,123,.5); }
+.source-image-nav span { min-width: 43px; color: #c0c7c5; font-size: 9px; text-align: center; }
+.source-preview-state { min-height: 72px; display: flex; justify-content: center; align-items: center; gap: 10px; color: #627073; font-size: 10px; }
+.source-preview-state .tiny-loader { position: static; flex: 0 0 auto; }
+.source-preview-state.is-error { color: #d49d91; padding: 14px; text-align: center; }
 
 .song-meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 .song-meta-grid label { display: flex; flex-direction: column; gap: 7px; }

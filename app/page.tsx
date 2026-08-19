@@ -36,6 +36,14 @@ type Job = {
   error?: string;
 };
 
+type SourcePreview = {
+  character: string;
+  kind: "video" | "images";
+  type: string;
+  title: string;
+  urls: string[];
+};
+
 const SOURCE_TYPES = ["EP 视频", "角色预告", "角色 PV", "角色演示", "生日贺图"] as const;
 type SourceType = typeof SOURCE_TYPES[number];
 
@@ -119,9 +127,20 @@ export default function Home() {
   const [songName, setSongName] = useState("");
   const [lyricOffsetSeconds, setLyricOffsetSeconds] = useState(0);
   const [sourceType, setSourceType] = useState<SourceType | "">("");
+  const [sourcePreview, setSourcePreview] = useState<SourcePreview | null>(null);
+  const [sourcePreviewError, setSourcePreviewError] = useState("");
+  const [loadingSourcePreview, setLoadingSourcePreview] = useState(false);
+  const [previewImageIndex, setPreviewImageIndex] = useState(0);
   const [job, setJob] = useState<Job | null>(null);
   const [loadingCharacters, setLoadingCharacters] = useState(false);
   const [error, setError] = useState("");
+
+  const resetSourcePreview = (loading: boolean) => {
+    setSourcePreview(null);
+    setSourcePreviewError("");
+    setPreviewImageIndex(0);
+    setLoadingSourcePreview(loading);
+  };
 
   useEffect(() => {
     if (selected && query === selected.name) return;
@@ -146,6 +165,31 @@ export default function Home() {
       window.clearTimeout(timer);
     };
   }, [query, selected]);
+
+  useEffect(() => {
+    if (!selected) return;
+
+    const controller = new AbortController();
+    const params = sourceType ? `?source_type=${encodeURIComponent(sourceType)}` : "";
+    void (async () => {
+      try {
+        const response = await fetch(
+          `${API_ROOT}/api/characters/${encodeURIComponent(selected.name)}/source${params}`,
+          { signal: controller.signal },
+        );
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "无法加载该类型素材");
+        setSourcePreview(data);
+      } catch (reason) {
+        if ((reason as Error).name !== "AbortError") {
+          setSourcePreviewError(reason instanceof Error ? reason.message : "无法加载该类型素材");
+        }
+      } finally {
+        if (!controller.signal.aborted) setLoadingSourcePreview(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [selected, sourceType]);
 
   useEffect(() => {
     if (!job || !["queued", "processing"].includes(job.status)) return;
@@ -235,6 +279,7 @@ export default function Home() {
               onChange={(event) => {
                 setQuery(event.target.value);
                 setSelected(null);
+                resetSourcePreview(false);
               }}
             />
             {loadingCharacters && <span className="tiny-loader" />}
@@ -245,6 +290,7 @@ export default function Home() {
                     setSelected(character);
                     setQuery(character.name);
                     setCharacters([]);
+                    resetSourcePreview(true);
                   }}>
                     <span className="avatar-mini">
                       {character.portrait ? <img src={assetUrl(character.portrait)} alt="" /> : character.name.slice(0, 1)}
@@ -282,7 +328,10 @@ export default function Home() {
                 name="source-type"
                 value=""
                 checked={!sourceType}
-                onChange={() => setSourceType("")}
+                onChange={() => {
+                  setSourceType("");
+                  resetSourcePreview(Boolean(selected));
+                }}
               />
               <strong>自动择优</strong>
               <small>按下方优先级自动选取</small>
@@ -294,12 +343,69 @@ export default function Home() {
                   name="source-type"
                   value={type}
                   checked={sourceType === type}
-                  onChange={() => setSourceType(type)}
+                  onChange={() => {
+                    setSourceType(type);
+                    resetSourcePreview(Boolean(selected));
+                  }}
                 />
                 <strong>{type}</strong>
               </label>
             ))}
           </fieldset>
+
+          <div className={`source-preview ${sourcePreview?.kind === "images" ? "is-images" : ""}`}>
+            {loadingSourcePreview ? (
+              <div className="source-preview-state"><span className="tiny-loader" /> 正在加载素材预览</div>
+            ) : sourcePreviewError ? (
+              <div className="source-preview-state is-error">{sourcePreviewError}</div>
+            ) : sourcePreview?.kind === "video" ? (
+              <>
+                <div className="source-preview-heading">
+                  <span>{sourcePreview.type}</span><strong title={sourcePreview.title}>{sourcePreview.title}</strong>
+                </div>
+                <video
+                  key={`${selected?.name}-${sourceType}-${sourcePreview.urls[0]}`}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  src={assetUrl(sourcePreview.urls[0])}
+                  aria-label={`${sourcePreview.title}素材预览`}
+                >
+                  当前浏览器不支持视频预览。
+                </video>
+              </>
+            ) : sourcePreview?.kind === "images" ? (
+              <>
+                <div className="source-preview-heading">
+                  <span>{sourcePreview.type}</span><strong title={sourcePreview.title}>{sourcePreview.title}</strong>
+                </div>
+                <div className="source-image-stage">
+                  <img
+                    key={sourcePreview.urls[previewImageIndex]}
+                    src={assetUrl(sourcePreview.urls[previewImageIndex])}
+                    alt={`${selected?.name || "角色"}生日贺图 ${previewImageIndex + 1}`}
+                  />
+                  {sourcePreview.urls.length > 1 && (
+                    <div className="source-image-nav">
+                      <button
+                        type="button"
+                        aria-label="查看上一张贺图"
+                        onClick={() => setPreviewImageIndex((index) => (index - 1 + sourcePreview.urls.length) % sourcePreview.urls.length)}
+                      >‹</button>
+                      <span>{previewImageIndex + 1} / {sourcePreview.urls.length}</span>
+                      <button
+                        type="button"
+                        aria-label="查看下一张贺图"
+                        onClick={() => setPreviewImageIndex((index) => (index + 1) % sourcePreview.urls.length)}
+                      >›</button>
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="source-preview-state">选择角色后可在这里预览对应素材</div>
+            )}
+          </div>
 
           <div className="divider" />
 
