@@ -41,6 +41,7 @@ MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus"}
 SUBTITLE_EXTENSIONS = {".srt", ".lrc"}
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+SOURCE_TYPES = ("EP 视频", "角色预告", "角色 PV", "角色演示", "生日贺图")
 
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -138,7 +139,10 @@ def video_rank(video: dict[str, Any]) -> tuple[int, str] | None:
     return None
 
 
-def choose_source(record: dict[str, Any]) -> dict[str, Any]:
+def choose_source(record: dict[str, Any], source_type: str | None = None) -> dict[str, Any]:
+    if source_type is not None and source_type not in SOURCE_TYPES:
+        raise HTTPException(400, f"画面素材类型无效，可选：{'、'.join(SOURCE_TYPES)}")
+
     ranked: list[tuple[int, str, dict[str, Any]]] = []
     for video in record.get("videos", []):
         if not isinstance(video, dict) or not video.get("url"):
@@ -146,7 +150,10 @@ def choose_source(record: dict[str, Any]) -> dict[str, Any]:
         rank = video_rank(video)
         if rank:
             ranked.append((rank[0], rank[1], video))
-    if ranked:
+    if source_type and source_type != "生日贺图":
+        ranked = [item for item in ranked if item[1] == source_type]
+
+    if ranked and source_type != "生日贺图":
         _, label, video = min(ranked, key=lambda item: (item[0], str(item[2].get("title", ""))))
         return {
             "kind": "video",
@@ -157,13 +164,15 @@ def choose_source(record: dict[str, Any]) -> dict[str, Any]:
 
     birthday_images = record.get("images", {}).get("生日贺图", [])
     urls = [item.get("url") for item in birthday_images if isinstance(item, dict) and item.get("url")]
-    if urls:
+    if urls and source_type in (None, "生日贺图"):
         return {
             "kind": "images",
             "type": "生日贺图",
             "title": f"{record.get('name', '')}生日贺图（{len(urls)} 张）",
             "urls": urls,
         }
+    if source_type:
+        raise HTTPException(422, f"该角色没有可用的{source_type}素材")
     raise HTTPException(422, "该角色没有可用的 EP、预告、PV、演示或生日贺图")
 
 
@@ -218,7 +227,16 @@ def srt_timestamp(seconds: float) -> str:
 
 def lrc_to_srt(text: str, duration: float) -> str:
     timestamps = re.compile(r"\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]")
-    rows: list[tuple[float, str]] = []
+    rows: list[tuple[float, str, float | None]] = []
+
+    def match_seconds(match: re.Match[str]) -> float:
+        fraction = match.group(3) or "0"
+        return (
+            int(match.group(1)) * 60
+            + int(match.group(2))
+            + int(fraction) / (10 ** len(fraction))
+        )
+
     for line in text.splitlines():
         matches = list(timestamps.finditer(line))
         if not matches:
@@ -226,19 +244,45 @@ def lrc_to_srt(text: str, duration: float) -> str:
         lyric = timestamps.sub("", line).strip()
         if not lyric:
             continue
-        for match in matches:
-            fraction = match.group(3) or "0"
-            fractional_seconds = int(fraction) / (10 ** len(fraction))
-            start = int(match.group(1)) * 60 + int(match.group(2)) + fractional_seconds
+
+        # Enhanced LRC places timestamps between characters or words, for
+        # example: [00:13.11]风[00:13.44]捎...[00:17.26].  Treating every
+        # timestamp as the beginning of the complete line creates dozens of
+        # overlapping identical SRT cues.  Collapse such a line into one cue;
+        # a trailing timestamp is the authoritative end of that line.
+        has_interleaved_lyric = any(
+            line[matches[index].end():matches[index + 1].start()].strip()
+            for index in range(len(matches) - 1)
+        )
+        if has_interleaved_lyric:
+            start = match_seconds(matches[0])
+            trailing_timestamp = not line[matches[-1].end():].strip()
+            explicit_end = match_seconds(matches[-1]) if trailing_timestamp else None
             if start < duration:
-                rows.append((start, lyric))
+                if explicit_end is not None and explicit_end <= start:
+                    explicit_end = None
+                rows.append((start, lyric, explicit_end))
+            continue
+
+        # Standard LRC may put several timestamps at the beginning to reuse a
+        # lyric line in multiple sections. Preserve that established meaning.
+        for match in matches:
+            start = match_seconds(match)
+            if start < duration:
+                rows.append((start, lyric, None))
+
     rows.sort(key=lambda row: row[0])
     if not rows:
         raise HTTPException(400, "LRC 字幕中没有可识别的时间标签")
     blocks = []
-    for index, (start, lyric) in enumerate(rows):
+    for index, (start, lyric, explicit_end) in enumerate(rows):
         next_start = rows[index + 1][0] if index + 1 < len(rows) else duration
-        end = min(duration, max(start + 0.8, min(next_start, start + 8.0)))
+        if explicit_end is not None:
+            end = min(duration, explicit_end, next_start)
+        else:
+            end = min(duration, next_start, start + 8.0)
+        if end <= start:
+            end = min(duration, start + 0.8)
         blocks.append(f"{index + 1}\n{srt_timestamp(start)} --> {srt_timestamp(end)}\n{lyric}\n")
     return "\n".join(blocks)
 
@@ -444,7 +488,7 @@ def process_job(job_id: str) -> None:
             )
         update_job(job_id, status="processing", progress=5, message="正在请求角色 Wiki 素材")
         record = character_record(job["character"])
-        source = choose_source(record)
+        source = choose_source(record, job.get("requested_source_type"))
         update_job(
             job_id,
             progress=14,
@@ -570,6 +614,7 @@ async def create_mv_job(
     original_artist: str | None = Form(None),
     song_name: str | None = Form(None),
     subtitles: UploadFile | None = File(None),
+    source_type: str | None = Form(None),
 ) -> dict[str, Any]:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         raise HTTPException(503, "未找到 FFmpeg，请先安装并加入 PATH")
@@ -589,8 +634,9 @@ async def create_mv_job(
     if len(clean_artist) > 160 or len(clean_song_name) > 160:
         raise HTTPException(400, "原唱歌手或歌曲名称过长")
 
+    clean_source_type = (source_type or "").strip() or None
     record = character_record(character)
-    choose_source(record)
+    source = choose_source(record, clean_source_type)
 
     job_id = uuid.uuid4().hex[:16]
     job_dir = WORK_DIR / job_id
@@ -617,6 +663,8 @@ async def create_mv_job(
         "progress": 0,
         "message": "任务已进入队列",
         "character": record.get("name", character.strip()),
+        "source_type": source["type"],
+        "source_title": source["title"],
         "duration": round(duration, 3),
         "original_artist": clean_artist or None,
         "song_name": clean_song_name or None,
@@ -628,6 +676,7 @@ async def create_mv_job(
         "updated_at": utc_now(),
         "job_dir": str(job_dir),
         "music_name": music_name,
+        "requested_source_type": clean_source_type,
     }
     with JOBS_LOCK:
         JOBS[job_id] = job
@@ -643,9 +692,10 @@ async def create_mv(
     original_artist: str | None = Form(None),
     song_name: str | None = Form(None),
     subtitles: UploadFile | None = File(None),
+    source_type: str | None = Form(None),
 ) -> dict[str, Any]:
     """Backward-compatible MV endpoint; artist/song enable automatic subtitles."""
-    return await create_mv_job(character, music, original_artist, song_name, subtitles)
+    return await create_mv_job(character, music, original_artist, song_name, subtitles, source_type)
 
 
 @app.post("/api/cover-mv", status_code=202)
@@ -655,11 +705,12 @@ async def create_cover_mv(
     original_artist: str = Form(...),
     song_name: str = Form(...),
     subtitles: UploadFile | None = File(None),
+    source_type: str | None = Form(None),
 ) -> dict[str, Any]:
     """Create a cover MV and automatically fetch verified synchronized lyrics."""
     if not original_artist.strip() or not song_name.strip():
         raise HTTPException(400, "原唱歌手和歌曲名称不能为空")
-    return await create_mv_job(character, music, original_artist, song_name, subtitles)
+    return await create_mv_job(character, music, original_artist, song_name, subtitles, source_type)
 
 
 @app.get("/api/jobs/{job_id}")

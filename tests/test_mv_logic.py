@@ -43,6 +43,48 @@ class SourceSelectionTests(unittest.TestCase):
         self.assertEqual(selected["kind"], "images")
         self.assertEqual(len(selected["urls"]), 2)
 
+    def test_manual_video_type_selection(self) -> None:
+        record = {
+            "name": "测试角色",
+            "videos": [
+                {"title": "《原神》角色演示-测试", "url": "/demo.mp4"},
+                {"title": "《原神》EP - 测试", "url": "/ep.mp4"},
+            ],
+            "images": {"生日贺图": [{"url": "/birthday.png"}]},
+        }
+
+        selected = choose_source(record, "角色演示")
+
+        self.assertEqual(selected["type"], "角色演示")
+        self.assertEqual(selected["urls"], ["/demo.mp4"])
+
+    def test_manual_birthday_selection_overrides_videos(self) -> None:
+        record = {
+            "name": "测试角色",
+            "videos": [{"title": "《原神》EP - 测试", "url": "/ep.mp4"}],
+            "images": {"生日贺图": [{"url": "/birthday.png"}]},
+        }
+
+        selected = choose_source(record, "生日贺图")
+
+        self.assertEqual(selected["kind"], "images")
+        self.assertEqual(selected["urls"], ["/birthday.png"])
+
+    def test_unavailable_manual_type_is_rejected(self) -> None:
+        with self.assertRaisesRegex(HTTPException, "角色 PV"):
+            choose_source(
+                {
+                    "name": "测试角色",
+                    "videos": [],
+                    "images": {"生日贺图": [{"url": "/birthday.png"}]},
+                },
+                "角色 PV",
+            )
+
+    def test_invalid_manual_type_is_rejected(self) -> None:
+        with self.assertRaisesRegex(HTTPException, "画面素材类型无效"):
+            choose_source({"name": "测试角色", "videos": [], "images": {}}, "其他")
+
     def test_missing_source_is_rejected(self) -> None:
         with self.assertRaises(HTTPException):
             choose_source({"name": "测试角色", "videos": [], "images": {}})
@@ -69,6 +111,25 @@ class SubtitleTests(unittest.TestCase):
         result = lrc_to_srt("[00:00.00]第一句\n[00:02.50]第二句", 5.0)
         self.assertIn("00:00:00,000 --> 00:00:02,500", result)
         self.assertIn("第二句", result)
+
+    def test_enhanced_lrc_is_collapsed_to_one_cue_per_line(self) -> None:
+        result = lrc_to_srt(
+            "[00:13.11]风[00:13.44]捎[00:13.82]大梦[00:14.20]\n"
+            "[00:14.57]似[00:14.97]你[00:15.44]在身侧[00:16.00]",
+            20.0,
+        )
+
+        self.assertEqual(result.count(" --> "), 2)
+        self.assertIn("00:00:13,110 --> 00:00:14,200", result)
+        self.assertIn("00:00:14,570 --> 00:00:16,000", result)
+        self.assertEqual(result.count("风捎大梦"), 1)
+        self.assertEqual(result.count("似你在身侧"), 1)
+
+    def test_standard_multi_timestamp_lrc_keeps_repeated_line(self) -> None:
+        result = lrc_to_srt("[00:01.00][00:03.00]副歌", 5.0)
+
+        self.assertEqual(result.count(" --> "), 2)
+        self.assertEqual(result.count("副歌"), 2)
 
     @patch("server.main.lyrics_agent_command", return_value=["lyrics-agent"])
     @patch("server.main.subprocess.run")

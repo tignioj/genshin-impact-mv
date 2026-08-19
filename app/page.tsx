@@ -35,6 +35,9 @@ type Job = {
   error?: string;
 };
 
+const SOURCE_TYPES = ["EP 视频", "角色预告", "角色 PV", "角色演示", "生日贺图"] as const;
+type SourceType = typeof SOURCE_TYPES[number];
+
 const API_ROOT = process.env.NEXT_PUBLIC_MV_API_URL || "http://127.0.0.1:8787";
 const WIKI_ROOT = process.env.NEXT_PUBLIC_GI_WIKI_URL || "http://127.0.0.1:8765";
 
@@ -106,6 +109,7 @@ export default function Home() {
   const [subtitle, setSubtitle] = useState<File | null>(null);
   const [originalArtist, setOriginalArtist] = useState("");
   const [songName, setSongName] = useState("");
+  const [sourceType, setSourceType] = useState<SourceType | "">("");
   const [job, setJob] = useState<Job | null>(null);
   const [loadingCharacters, setLoadingCharacters] = useState(false);
   const [error, setError] = useState("");
@@ -170,6 +174,7 @@ export default function Home() {
     form.append("music", music);
     form.append("original_artist", originalArtist.trim());
     form.append("song_name", songName.trim());
+    if (sourceType) form.append("source_type", sourceType);
     if (subtitle) form.append("subtitles", subtitle);
     try {
       const response = await fetch(`${API_ROOT}/api/cover-mv`, { method: "POST", body: form });
@@ -197,7 +202,7 @@ export default function Home() {
       <section className="hero" id="top">
         <div className="eyebrow"><span>✦</span> 一首歌，一段属于角色的旅程</div>
         <h1>让旋律驶入<br /><em>提瓦特的画面</em></h1>
-        <p>选择角色并上传翻唱音乐。系统会自动寻找原曲同步歌词，并从角色 EP、预告、PV、演示或生日贺图中选取最佳素材。</p>
+        <p>选择角色并上传翻唱音乐。系统会自动寻找原曲同步歌词，画面素材既可自动择优，也可手动指定类型。</p>
         <div className="priority-line" aria-label="素材选择优先级">
           <span>EP 视频</span><b>›</b><span>角色预告</span><b>›</b><span>角色 PV</span><b>›</b><span>角色演示</span><b>›</b><span>生日贺图</span>
         </div>
@@ -256,6 +261,40 @@ export default function Home() {
 
           <div className="section-heading compact">
             <span className="step-number">02</span>
+            <div><h2>选择画面素材</h2><p>自动择优，或手动指定一种角色素材类型</p></div>
+          </div>
+
+          <fieldset className="source-picker">
+            <legend>画面素材类型</legend>
+            <label className={!sourceType ? "is-selected" : ""}>
+              <input
+                type="radio"
+                name="source-type"
+                value=""
+                checked={!sourceType}
+                onChange={() => setSourceType("")}
+              />
+              <strong>自动择优</strong>
+              <small>按下方优先级自动选取</small>
+            </label>
+            {SOURCE_TYPES.map((type) => (
+              <label key={type} className={sourceType === type ? "is-selected" : ""}>
+                <input
+                  type="radio"
+                  name="source-type"
+                  value={type}
+                  checked={sourceType === type}
+                  onChange={() => setSourceType(type)}
+                />
+                <strong>{type}</strong>
+              </label>
+            ))}
+          </fieldset>
+
+          <div className="divider" />
+
+          <div className="section-heading compact">
+            <span className="step-number">03</span>
             <div><h2>加入翻唱与原曲信息</h2><p>原唱歌手和歌曲名称用于自动查找同步歌词</p></div>
           </div>
 
@@ -328,7 +367,7 @@ export default function Home() {
             <div className="status-title"><span>{statusLabel}</span><b>{job ? `${Math.round(progress)}%` : "—"}</b></div>
             <div className="progress-track"><i style={{ width: `${progress}%` }} /></div>
             <div className="status-meta">
-              <span><small>画面来源</small><strong>{job?.source_type || "自动择优"}</strong></span>
+              <span><small>画面来源</small><strong>{job?.source_type || sourceType || "自动择优"}</strong></span>
               <span><small>成片时长</small><strong>{job?.duration ? `${Math.floor(job.duration / 60)}:${String(Math.round(job.duration % 60)).padStart(2, "0")}` : "随音乐"}</strong></span>
             </div>
             {job?.lyrics_message && <p className={`lyrics-state is-${job.lyrics_status || "pending"}`}>{job.lyrics_message}</p>}
