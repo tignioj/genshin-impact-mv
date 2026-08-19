@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -70,7 +71,7 @@ def utc_now() -> str:
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "id", "status", "progress", "message", "character", "source_type",
-        "source_title", "duration", "original_artist", "song_name", "has_subtitles",
+        "source_title", "duration", "original_artist", "song_name", "lyric_offset_seconds", "has_subtitles",
         "subtitle_source", "lyrics_status", "lyrics_message", "lyrics_sources",
         "preview_url", "download_url", "error", "created_at", "updated_at",
     )
@@ -225,7 +226,7 @@ def srt_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
 
 
-def lrc_to_srt(text: str, duration: float) -> str:
+def lrc_to_srt(text: str, duration: float, offset_seconds: float = 0.0) -> str:
     timestamps = re.compile(r"\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]")
     rows: list[tuple[float, str, float | None]] = []
 
@@ -258,39 +259,52 @@ def lrc_to_srt(text: str, duration: float) -> str:
             start = match_seconds(matches[0])
             trailing_timestamp = not line[matches[-1].end():].strip()
             explicit_end = match_seconds(matches[-1]) if trailing_timestamp else None
-            if start < duration:
-                if explicit_end is not None and explicit_end <= start:
-                    explicit_end = None
-                rows.append((start, lyric, explicit_end))
+            if explicit_end is not None and explicit_end <= start:
+                explicit_end = None
+            rows.append((start, lyric, explicit_end))
             continue
 
         # Standard LRC may put several timestamps at the beginning to reuse a
         # lyric line in multiple sections. Preserve that established meaning.
         for match in matches:
             start = match_seconds(match)
-            if start < duration:
-                rows.append((start, lyric, None))
+            rows.append((start, lyric, None))
 
     rows.sort(key=lambda row: row[0])
     if not rows:
         raise HTTPException(400, "LRC 字幕中没有可识别的时间标签")
     blocks = []
-    for index, (start, lyric, explicit_end) in enumerate(rows):
+    for index, (original_start, lyric, explicit_end) in enumerate(rows):
         next_start = rows[index + 1][0] if index + 1 < len(rows) else duration
         if explicit_end is not None:
-            end = min(duration, explicit_end, next_start)
+            original_end = min(explicit_end, next_start)
         else:
-            end = min(duration, next_start, start + 8.0)
-        if end <= start:
-            end = min(duration, start + 0.8)
-        blocks.append(f"{index + 1}\n{srt_timestamp(start)} --> {srt_timestamp(end)}\n{lyric}\n")
+            original_end = min(next_start, original_start + 8.0)
+        if original_end <= original_start:
+            original_end = original_start + 0.8
+
+        shifted_start = original_start + offset_seconds
+        shifted_end = original_end + offset_seconds
+        start = max(0.0, shifted_start)
+        end = min(duration, shifted_end)
+        if shifted_start >= duration or shifted_end <= 0 or end <= start:
+            continue
+        blocks.append(f"{len(blocks) + 1}\n{srt_timestamp(start)} --> {srt_timestamp(end)}\n{lyric}\n")
+    if not blocks:
+        raise HTTPException(400, "歌词偏移后没有位于音乐时长内的字幕")
     return "\n".join(blocks)
 
 
-def prepare_subtitle(payload: bytes, extension: str, duration: float, destination: Path) -> None:
+def prepare_subtitle(
+    payload: bytes,
+    extension: str,
+    duration: float,
+    destination: Path,
+    offset_seconds: float = 0.0,
+) -> None:
     text = decode_text(payload).replace("\r\n", "\n").replace("\r", "\n")
     if extension == ".lrc":
-        text = lrc_to_srt(text, duration)
+        text = lrc_to_srt(text, duration, offset_seconds)
     elif "-->" not in text:
         raise HTTPException(400, "SRT 字幕缺少有效时间轴")
     destination.write_text(text, encoding="utf-8")
@@ -385,7 +399,13 @@ def prepare_auto_subtitle(job_id: str, job: dict[str, Any], destination: Path) -
         return False
 
     try:
-        prepare_subtitle(lyrics.encode("utf-8"), ".lrc", float(job["duration"]), destination)
+        prepare_subtitle(
+            lyrics.encode("utf-8"),
+            ".lrc",
+            float(job["duration"]),
+            destination,
+            float(job.get("lyric_offset_seconds", 0.0)),
+        )
     except HTTPException as exc:
         update_job(
             job_id,
@@ -613,6 +633,7 @@ async def create_mv_job(
     music: UploadFile = File(...),
     original_artist: str | None = Form(None),
     song_name: str | None = Form(None),
+    lyric_offset_seconds: float = Form(0.0),
     subtitles: UploadFile | None = File(None),
     source_type: str | None = Form(None),
 ) -> dict[str, Any]:
@@ -633,6 +654,8 @@ async def create_mv_job(
         raise HTTPException(400, "原唱歌手和歌曲名称必须同时填写")
     if len(clean_artist) > 160 or len(clean_song_name) > 160:
         raise HTTPException(400, "原唱歌手或歌曲名称过长")
+    if not math.isfinite(lyric_offset_seconds) or abs(lyric_offset_seconds) > MAX_DURATION_SECONDS:
+        raise HTTPException(400, "歌词偏移秒数必须在 -600 到 +600 之间")
 
     clean_source_type = (source_type or "").strip() or None
     record = character_record(character)
@@ -652,7 +675,13 @@ async def create_mv_job(
             shutil.rmtree(job_dir, ignore_errors=True)
             raise HTTPException(413, "字幕文件不能超过 5 MB")
         try:
-            prepare_subtitle(subtitle_payload, subtitle_extension, duration, job_dir / "subtitle.srt")
+            prepare_subtitle(
+                subtitle_payload,
+                subtitle_extension,
+                duration,
+                job_dir / "subtitle.srt",
+                lyric_offset_seconds,
+            )
         except HTTPException:
             shutil.rmtree(job_dir, ignore_errors=True)
             raise
@@ -668,6 +697,7 @@ async def create_mv_job(
         "duration": round(duration, 3),
         "original_artist": clean_artist or None,
         "song_name": clean_song_name or None,
+        "lyric_offset_seconds": lyric_offset_seconds,
         "has_subtitles": has_subtitles,
         "subtitle_source": "upload" if has_subtitles else "pending" if clean_artist else "none",
         "lyrics_status": "manual" if has_subtitles else "pending" if clean_artist else "not_requested",
@@ -691,11 +721,14 @@ async def create_mv(
     music: UploadFile = File(...),
     original_artist: str | None = Form(None),
     song_name: str | None = Form(None),
+    lyric_offset_seconds: float = Form(0.0),
     subtitles: UploadFile | None = File(None),
     source_type: str | None = Form(None),
 ) -> dict[str, Any]:
     """Backward-compatible MV endpoint; artist/song enable automatic subtitles."""
-    return await create_mv_job(character, music, original_artist, song_name, subtitles, source_type)
+    return await create_mv_job(
+        character, music, original_artist, song_name, lyric_offset_seconds, subtitles, source_type
+    )
 
 
 @app.post("/api/cover-mv", status_code=202)
@@ -704,13 +737,16 @@ async def create_cover_mv(
     music: UploadFile = File(...),
     original_artist: str = Form(...),
     song_name: str = Form(...),
+    lyric_offset_seconds: float = Form(0.0),
     subtitles: UploadFile | None = File(None),
     source_type: str | None = Form(None),
 ) -> dict[str, Any]:
     """Create a cover MV and automatically fetch verified synchronized lyrics."""
     if not original_artist.strip() or not song_name.strip():
         raise HTTPException(400, "原唱歌手和歌曲名称不能为空")
-    return await create_mv_job(character, music, original_artist, song_name, subtitles, source_type)
+    return await create_mv_job(
+        character, music, original_artist, song_name, lyric_offset_seconds, subtitles, source_type
+    )
 
 
 @app.get("/api/jobs/{job_id}")

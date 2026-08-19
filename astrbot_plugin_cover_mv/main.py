@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import mimetypes
 import re
 import shlex
@@ -31,19 +32,41 @@ def _safe_filename_part(value: str, fallback: str) -> str:
     return cleaned[:80] or fallback
 
 
-def _parse_command_args(raw: str) -> tuple[str, str, str]:
+def _parse_command_args(raw: str) -> tuple[str, str, str, float]:
     try:
         values = shlex.split(raw.strip())
     except ValueError as exc:
         raise ValueError(f"命令参数中的引号不完整：{exc}") from exc
-    if len(values) != 3 or any(not value.strip() for value in values):
+    if len(values) not in (3, 4) or any(not value.strip() for value in values):
         raise ValueError(
-            "用法：回复一个音乐文件并发送 /翻唱视频 角色名称 原唱作者 原曲名称。"
+            "用法：回复一个音乐文件并发送 /翻唱视频 角色名称 原唱作者 原曲名称 [+/-歌词偏移秒数]。"
             "名称含空格时请用英文双引号包住。"
         )
-    if any(len(value) > 160 for value in values):
+    if any(len(value) > 160 for value in values[:3]):
         raise ValueError("角色名称、原唱作者或原曲名称过长。")
-    return tuple(value.strip() for value in values)
+    lyric_offset_seconds = 0.0
+    if len(values) == 4:
+        try:
+            lyric_offset_seconds = float(values[3])
+        except ValueError as exc:
+            raise ValueError("歌词偏移必须是秒数，例如 +5（延后 5 秒）或 -2（提前 2 秒）。") from exc
+        if not math.isfinite(lyric_offset_seconds) or abs(lyric_offset_seconds) > 600:
+            raise ValueError("歌词偏移秒数必须在 -600 到 +600 之间。")
+    return (
+        values[0].strip(),
+        values[1].strip(),
+        values[2].strip(),
+        lyric_offset_seconds,
+    )
+
+
+def _offset_description(offset_seconds: float) -> str:
+    seconds = f"{abs(offset_seconds):g}"
+    if offset_seconds > 0:
+        return f"歌词延后 {seconds} 秒"
+    if offset_seconds < 0:
+        return f"歌词提前 {seconds} 秒"
+    return "歌词不偏移"
 
 
 def _file_name(component: File, path: str) -> str:
@@ -61,7 +84,7 @@ def _file_name(component: File, path: str) -> str:
     PLUGIN_NAME,
     "tignioj",
     "引用音乐并调用映界服务制作原神角色翻唱 MV",
-    "1.0.0",
+    "1.1.0",
 )
 class CoverMvPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -146,12 +169,14 @@ class CoverMvPlugin(Star):
         character: str,
         original_artist: str,
         song_name: str,
+        lyric_offset_seconds: float,
     ) -> dict:
         timeout = aiohttp.ClientTimeout(total=300, connect=30, sock_read=300)
         form = aiohttp.FormData()
         form.add_field("character", character)
         form.add_field("original_artist", original_artist)
         form.add_field("song_name", song_name)
+        form.add_field("lyric_offset_seconds", f"{lyric_offset_seconds:g}")
         content_type = mimetypes.guess_type(original_name)[0] or "application/octet-stream"
         handle = await asyncio.to_thread(Path(audio_path).open, "rb")
         form.add_field(
@@ -240,9 +265,9 @@ class CoverMvPlugin(Star):
 
     @filter.command("翻唱视频")
     async def cover_mv(self, event: AstrMessageEvent, args: GreedyStr):
-        """回复音乐并制作原神角色 MV：角色 原唱 原曲。"""
+        """回复音乐并制作原神角色 MV：角色 原唱 原曲 [歌词偏移秒数]。"""
         try:
-            character, original_artist, song_name = _parse_command_args(str(args))
+            character, original_artist, song_name, lyric_offset_seconds = _parse_command_args(str(args))
             audio_path, original_name = await self._find_quoted_audio(event)
             self._validate_audio(audio_path, original_name)
         except Exception as error:
@@ -252,7 +277,8 @@ class CoverMvPlugin(Star):
         await event.send(
             event.plain_result(
                 f"已接收引用的音乐，开始制作 {character} 的《{song_name}》翻唱视频。"
-                "系统会自动查找同步歌词并合成 1080P MV，请耐心等待。"
+                f"系统会自动查找同步歌词（{_offset_description(lyric_offset_seconds)}）"
+                "并合成 1080P MV，请耐心等待。"
             )
         )
         try:
@@ -263,6 +289,7 @@ class CoverMvPlugin(Star):
                 character,
                 original_artist,
                 song_name,
+                lyric_offset_seconds,
             )
             job_id = str(job["id"])
             await event.send(event.plain_result(f"MV 任务已创建：{job_id}"))

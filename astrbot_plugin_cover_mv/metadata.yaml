@@ -2,6 +2,5 @@ name: astrbot_plugin_cover_mv
 display_name: 原神翻唱视频
 desc: 引用音乐文件并调用映界服务制作原神角色 1080P 翻唱 MV
 author: tignioj
-version: 1.0.0
+version: 1.1.0
 repo: https://github.com/tignioj/genshin-impact-mv
-

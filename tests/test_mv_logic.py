@@ -131,6 +131,18 @@ class SubtitleTests(unittest.TestCase):
         self.assertEqual(result.count(" --> "), 2)
         self.assertEqual(result.count("副歌"), 2)
 
+    def test_positive_offset_delays_lyrics(self) -> None:
+        result = lrc_to_srt("[00:01.00]第一句\n[00:03.50]第二句", 10.0, 5.0)
+
+        self.assertIn("00:00:06,000 --> 00:00:08,500", result)
+        self.assertIn("00:00:08,500 --> 00:00:10,000", result)
+
+    def test_negative_offset_advances_and_clips_lyrics(self) -> None:
+        result = lrc_to_srt("[00:01.00]第一句\n[00:03.50]第二句", 10.0, -2.0)
+
+        self.assertIn("00:00:00,000 --> 00:00:01,500", result)
+        self.assertIn("00:00:01,500 --> 00:00:08,000", result)
+
     @patch("server.main.lyrics_agent_command", return_value=["lyrics-agent"])
     @patch("server.main.subprocess.run")
     def test_fetch_timed_lyrics_calls_agent_in_timed_mode(self, run, _command) -> None:

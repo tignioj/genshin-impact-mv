@@ -117,6 +117,7 @@ Content-Type: multipart/form-data
 | `music` | 文件 | MP3/WAV/M4A/FLAC/AAC/OGG/OPUS，最长 10 分钟 |
 | `original_artist` | 文本 | 原曲的原唱歌手；用于调用歌词 Agent |
 | `song_name` | 文本 | 原歌曲名称；用于调用歌词 Agent |
+| `lyric_offset_seconds` | 可选数字 | 整体平移歌词时间轴；正数延后、负数提前，范围 -600 到 +600，默认 0 |
 | `subtitles` | 可选文件 | SRT 或 LRC，最大 5 MB；上传后优先使用并跳过自动搜索 |
 
 示例：
@@ -126,7 +127,8 @@ curl.exe -X POST http://127.0.0.1:8787/api/cover-mv `
   -F "character=优菈" `
   -F "music=@D:\music\song.mp3" `
   -F "original_artist=周杰伦" `
-  -F "song_name=晴天"
+  -F "song_name=晴天" `
+  -F "lyric_offset_seconds=+5"
 ```
 
 后台会执行 `lyrics-agent --artist <原唱歌手> --song <歌曲名称> --timed --quiet`。只有结果同时满足 `found=true`、`timed=true` 且 LRC 时间轴可解析时才加入字幕，否则继续生成无字幕视频。原有 `POST /api/mv` 仍兼容，传入 `original_artist` 与 `song_name` 时也会启用自动字幕。
